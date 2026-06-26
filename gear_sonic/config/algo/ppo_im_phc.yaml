@@ -1,0 +1,48 @@
+# @package _global_
+
+defaults:
+  - trl@algo.trl: ppo
+  - /actor_critic: mlp
+
+algo:
+  _recursive_: False
+  config:
+    num_learning_epochs: 3
+    num_mini_batches: 2
+    clip_param: 0.2
+    gamma: 0.99
+    lam: 0.95
+    value_loss_coef: 1.0
+    entropy_coef: 0.01
+    actor_learning_rate: 5e-5  # raised from 2e-5 for single-GPU stability
+    critic_learning_rate: 1.e-3
+    max_grad_norm: 1.0
+    use_clipped_value_loss: True
+    schedule: "adaptive"
+    desired_kl: 0.02           # raised from 0.01 to tolerate single-GPU gradient noise
+    adaptive_lr_min: 5e-5      # raised floor from 1e-5 (prevents LR death spiral)
+    adaptive_lr_max: 5e-4      # raised ceiling from 2e-4
+
+    use_new_actor_critic: True
+    use_padding_mask: False
+    ppo_shuffle_every_epoch: True
+    sync_advantage_normalization: True
+    empty_cache_every_n_ppo_epoch: 3
+
+    num_steps_per_env: 32
+    save_interval: 500
+    eval_frequency: 500
+    load_optimizer: True
+
+    init_noise_std: 0.05
+
+    num_learning_iterations: 100000
+    init_at_random_ep_len: True
+
+    # Rollout accumulation: collect N rollouts under π_old before each PPO update.
+    # Set to N > 1 to simulate N-GPU DDP on a single GPU (N× longer per iteration).
+    # Example: rollout_accumulation_steps: 128  ← matches 128-GPU paper quality
+    rollout_accumulation_steps: 1  # default: off (standard PPO)
+
+    global_rank: 0
+    world_size: 1
