@@ -68,6 +68,7 @@ instance/
 
 # Sphinx documentation
 data/
+!gear_sonic/data/assets/
 
 # PyBuilder
 .pybuilder/
@@ -207,6 +208,7 @@ teleop_vids/
 *.code-workspace
 # Motion/training data (large local datasets, not tracked in git)
 data/
+!gear_sonic/data/assets/
 bones_seed_smpl/
 sonic_release/
 # Training output logs
