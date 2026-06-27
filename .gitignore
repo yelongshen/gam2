@@ -219,3 +219,4 @@ models/
 # Downloaded from HuggingFace (hf download)
 sample_data/
 sonic_release/
+motionbricks/out/**/*.ckpt
