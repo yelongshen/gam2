@@ -108,7 +108,7 @@ class ImEvalCallback(TrainerCallback):
     """Callback to evaluate motion imtiation during training. Supports multigpu ."""
 
     def __init__(
-        self, eval_frequency, empty_cache_freq=20, eval_only=False, output_dir=None, log_keys=None
+        self, eval_frequency, empty_cache_freq=20, eval_only=False, output_dir=None, log_keys=None, max_eval_loops=None, max_steps_per_loop=None
     ):
         super().__init__()
         self.eval_frequency = eval_frequency
@@ -119,6 +119,8 @@ class ImEvalCallback(TrainerCallback):
         self.render_only = False
         self.log_keys = log_keys
         self._has_object = False
+        self.max_eval_loops = max_eval_loops
+        self.max_steps_per_loop = max_steps_per_loop
 
     def on_step_end(self, args, state, control, **kwargs):
 
@@ -439,6 +441,8 @@ class ImEvalCallback(TrainerCallback):
         if "max_render_envs" in self.env.config:
             self.num_total_env_eval_loops = 1
             self.render_only = True
+        if self.max_eval_loops is not None:
+            self.num_total_env_eval_loops = min(self.num_total_env_eval_loops, self.max_eval_loops)
 
         self.env_eval_loop_idx = 0
         self.pbar = tqdm(range(self.num_total_env_eval_loops), desc="Total evaluation progress")
@@ -567,6 +571,9 @@ class ImEvalCallback(TrainerCallback):
                 curr_max = self.curr_steps + 1  # For matching up the current steps and max steps.
         else:
             curr_max = self.env._motion_lib.get_motion_num_steps(self.env.motion_ids).max().item()
+
+        if self.max_steps_per_loop is not None:
+            curr_max = min(curr_max, self.max_steps_per_loop)
 
         if self.steps_pbar is None and (~self.terminate_state).sum() > 0:
             self.steps_pbar = tqdm(total=int(curr_max), desc="Sequence progress", leave=False)

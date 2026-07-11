@@ -7,6 +7,7 @@ from pathlib import Path
 import random
 import re
 import resource
+import time
 
 import easydict
 import joblib
@@ -217,6 +218,7 @@ def interpolate_contact_center(
 
 class MotionLibBase:
     def __init__(self, motion_lib_cfg, num_envs, device):
+        init_start_time = time.perf_counter()
         self.m_cfg = motion_lib_cfg
         self.motion_fps_scale = self.m_cfg.get("motion_fps_scale", 1.0)
         self._sim_fps = 1 / self.m_cfg.get("step_dt", 1 / 50)
@@ -234,14 +236,22 @@ class MotionLibBase:
         self.skeleton_tree = skeleton.SkeletonTree.from_mjcf(skeleton_file)
         logger.info(f"Loaded skeleton from {skeleton_file}")
         logger.info(f"Loading motion data from {self.m_cfg.motion_file}...")
+        load_data_start_time = time.perf_counter()
         self.load_data(self.m_cfg.motion_file)
+        logger.info(f"Motion data index initialized in {time.perf_counter() - load_data_start_time:.3f}s")
         self.use_adaptive_sampling = self.adaptive_sampling_cfg.get("enable", False)
         if self.use_adaptive_sampling:
+            adaptive_start_time = time.perf_counter()
             self.init_adaptive_sampling()
+            logger.info(
+                f"Adaptive sampling initialized in {time.perf_counter() - adaptive_start_time:.3f}s"
+            )
+        setup_start_time = time.perf_counter()
         self.setup_constants(
             fix_height=motion_lib_cfg.get("fix_height", FixHeightMode.no_fix),
             multi_thread=self.m_cfg.get("multi_thread", True),
         )
+        logger.info(f"Motion constants initialized in {time.perf_counter() - setup_start_time:.3f}s")
 
         self.vid_smpl_pose = None
         self.vid_smpl_joints = None
@@ -249,6 +259,7 @@ class MotionLibBase:
         smpl_motion_file = motion_lib_cfg.get("smpl_motion_file", None)
         self.smpl_data_keys = set()
         if smpl_motion_file is not None:
+            smpl_start_time = time.perf_counter()
             if smpl_motion_file in ("dummy", "zeros"):
                 # Generate dummy zero SMPL data so SMPL observation terms work
                 # without needing to null them out in the config.
@@ -276,6 +287,10 @@ class MotionLibBase:
                             self.smpl_data.append(None)
             else:
                 self.smpl_data = [None] * len(self._motion_data_keys)
+            logger.info(
+                f"SMPL side data indexed in {time.perf_counter() - smpl_start_time:.3f}s "
+                f"({len(self.smpl_data_keys)} matched motions)"
+            )
 
         self.smpl_y_up = motion_lib_cfg.get("smpl_y_up", False)
 
@@ -286,6 +301,7 @@ class MotionLibBase:
         self.soma_y_up = motion_lib_cfg.get("soma_y_up", True)  # BVH is Y-up by default
         self.num_soma_joints = motion_lib_cfg.get("num_soma_joints", 26)
         if soma_motion_file is not None:
+            soma_start_time = time.perf_counter()
             if soma_motion_file in ("dummy", "zeros"):
                 self.soma_data = [None] * len(self._motion_data_keys)
             elif osp.exists(soma_motion_file):
@@ -320,6 +336,10 @@ class MotionLibBase:
                             self.soma_data.append(None)
             else:
                 self.soma_data = [None] * len(self._motion_data_keys)
+            logger.info(
+                f"SOMA side data indexed in {time.perf_counter() - soma_start_time:.3f}s "
+                f"({len(self.soma_data_keys)} matched motions)"
+            )
 
         # Object data loading (similar to SMPL data)
         self.object_data = None
@@ -327,6 +347,7 @@ class MotionLibBase:
         self.object_data_keys = set()
         self.max_num_objects = motion_lib_cfg.get("max_num_objects", 1)
         if object_motion_file is not None:
+            object_start_time = time.perf_counter()
             if osp.isfile(object_motion_file):
                 self.object_data = joblib.load(object_motion_file)
                 self.object_data_keys = set(self.object_data.keys())
@@ -346,6 +367,10 @@ class MotionLibBase:
                         self.object_data_keys.add(seq)
                     else:
                         self.object_data.append(None)
+            logger.info(
+                f"Object side data indexed in {time.perf_counter() - object_start_time:.3f}s "
+                f"({len(self.object_data_keys)} matched motions)"
+            )
         # randomize the upper body poses condition
         self.randomize_upper_body_poses = self.m_cfg.get("cat_upper_body_poses", False)
         self.cat_upper_body_poses_prob = self.m_cfg.get("cat_upper_body_poses_prob", 0.0)
@@ -360,6 +385,7 @@ class MotionLibBase:
         self.randomize_wrist_std = self.m_cfg.get("randomize_wrist_std", 0.1)
         # MuJoCo DOF indices for wrist joints (L/R roll/pitch/yaw)
         self.wrist_mujoco_dof_indices = [19, 20, 21, 26, 27, 28]
+        logger.info(f"Motion library initialized in {time.perf_counter() - init_start_time:.3f}s")
 
     def load_data(self, motion_file):
         if osp.isfile(motion_file):
@@ -1012,6 +1038,7 @@ class MotionLibBase:
         num_motions_to_load=None,
         is_evaluation=False,
     ):
+        load_start_time = time.perf_counter()
 
         if "gts" in self.__dict__:
             del (
@@ -1577,6 +1604,7 @@ class MotionLibBase:
         logger.info(
             f"Loaded {num_motions:d} motions with a total length of {total_len:.3f}s and {self.body_pos_w.shape[0]} frames."  # noqa: E501
         )
+        logger.info(f"Motion tensor load completed in {time.perf_counter() - load_start_time:.3f}s")
 
         del (
             motions,
@@ -1883,8 +1911,12 @@ class MotionLibBase:
                     curr_smpl_data = smpl_data_list[f]
                     if curr_smpl_data is not None:
                         if "path" in curr_smpl_data:
-                            curr_smpl_data = joblib.load(curr_smpl_data["path"])
-
+                            try:
+                                curr_smpl_data = joblib.load(curr_smpl_data["path"])
+                            except Exception as e:
+                                print(f"[WARN] Skipping corrupted smpl file {curr_smpl_data['path']}: {e}")  # noqa: T201
+                                curr_smpl_data = None
+                    if curr_smpl_data is not None:
                         if curr_smpl_data["fps"] != self.target_fps:
                             smpl_pose = torch.tensor(curr_smpl_data["pose_aa"][start:end]).float()
                             smpl_pose[:, -6:] = 0.0
