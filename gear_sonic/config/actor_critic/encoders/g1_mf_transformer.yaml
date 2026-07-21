@@ -1,0 +1,15 @@
+g1:
+  inputs: ["command_multi_future_nonflat", "motion_anchor_ori_b_mf_nonflat"]
+  params:
+    _target_: gear_sonic.trl.modules.transformer_token_encoder.TransformerTokenEncoder
+    input_dim:
+    output_dim:
+    num_input_temporal_dims: ${manager_env.commands.motion.num_future_frames}
+    num_output_temporal_dims: ${algo.config.actor.backbone.max_num_tokens}
+    d_model: 256
+    nhead: 8
+    num_layers: 4
+    dim_feedforward: 1024
+    dropout: 0.0
+    activation: gelu
+    norm_first: true

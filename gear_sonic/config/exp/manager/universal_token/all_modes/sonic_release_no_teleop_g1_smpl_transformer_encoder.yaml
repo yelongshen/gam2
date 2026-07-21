@@ -1,0 +1,24 @@
+# @package _global_
+# SONIC release no-teleop variant using Transformer G1/SMPL encoders and existing MLP decoders.
+
+defaults:
+  - sonic_release_no_teleop_g1_smpl_consistency
+  - override /actor_critic: universal_token/g1_smpl_transformer_encoder_v1
+  - _self_
+
+exp_var: transformer_encoder
+
+manager_env:
+  commands:
+    motion:
+      encoder_sample_probs:
+        g1: 1.0
+        smpl: 1.0
+      teleop_sample_prob_when_smpl: 0.0
+
+algo:
+  config:
+    actor:
+      backbone:
+        active_encoders: ["g1", "smpl"]
+        reencode_smpl_g1_recon: true

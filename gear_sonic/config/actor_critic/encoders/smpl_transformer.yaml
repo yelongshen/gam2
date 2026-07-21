@@ -1,0 +1,15 @@
+smpl:
+  inputs: ["smpl_joints_multi_future_nonflat", "smpl_root_ori_b_multi_future"]
+  params:
+    _target_: gear_sonic.trl.modules.transformer_token_encoder.TransformerTokenEncoder
+    input_dim:
+    output_dim:
+    num_input_temporal_dims: ${manager_env.commands.motion.smpl_num_future_frames}
+    num_output_temporal_dims: ${algo.config.actor.backbone.max_num_tokens}
+    d_model: 256
+    nhead: 8
+    num_layers: 4
+    dim_feedforward: 1024
+    dropout: 0.0
+    activation: gelu
+    norm_first: true
