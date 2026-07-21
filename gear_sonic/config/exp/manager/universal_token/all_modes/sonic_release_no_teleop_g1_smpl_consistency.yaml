@@ -2,7 +2,7 @@
 # SONIC release variant without teleop encoder sampling, while keeping G1-SMPL latent consistency.
 
 defaults:
-  - sonic_release
+  - /exp/manager/universal_token/all_modes/sonic_release
   - override /aux_losses: universal_token/g1_recon_and_g1_smpl_consistency
   - override /actor_critic: universal_token/g1_smpl_mlp_v1
   - _self_
@@ -14,6 +14,9 @@ manager_env:
         g1: 1.0
         smpl: 1.0
       teleop_sample_prob_when_smpl: 0.0
+      motion_lib_cfg:
+        motion_file: data/locomotion/robot_filtered
+        smpl_motion_file: data/locomotion/smpl_filtered
 
 algo:
   config:
