@@ -104,6 +104,108 @@ def create_html_table(metrics_dict):
     return wandb.Html(html)
 
 
+def _json_safe(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _compute_error_accel(joints_gt, joints_pred, vis=None):
+    accel_gt = joints_gt[:-2] - 2 * joints_gt[1:-1] + joints_gt[2:]
+    accel_pred = joints_pred[:-2] - 2 * joints_pred[1:-1] + joints_pred[2:]
+    normed = np.linalg.norm(accel_pred - accel_gt, axis=2)
+
+    if vis is None:
+        new_vis = np.ones(len(normed), dtype=bool)
+    else:
+        invis = np.logical_not(vis)
+        invis1 = np.roll(invis, -1)
+        invis2 = np.roll(invis, -2)
+        new_invis = np.logical_or(invis, np.logical_or(invis1, invis2))[:-2]
+        new_vis = np.logical_not(new_invis)
+    return np.mean(normed[new_vis], axis=1)
+
+
+def _compute_error_vel(joints_gt, joints_pred, vis=None):
+    vel_gt = joints_gt[1:] - joints_gt[:-1]
+    vel_pred = joints_pred[1:] - joints_pred[:-1]
+    normed = np.linalg.norm(vel_pred - vel_gt, axis=2)
+
+    if vis is None:
+        new_vis = np.ones(len(normed), dtype=bool)
+    else:
+        new_vis = vis[1:]
+    return np.mean(normed[new_vis], axis=1)
+
+
+def _p_mpjpe(predicted, target):
+    assert predicted.shape == target.shape
+
+    mu_x = np.mean(target, axis=1, keepdims=True)
+    mu_y = np.mean(predicted, axis=1, keepdims=True)
+
+    x0 = target - mu_x
+    y0 = predicted - mu_y
+
+    norm_x = np.sqrt(np.sum(x0**2, axis=(1, 2), keepdims=True))
+    norm_y = np.sqrt(np.sum(y0**2, axis=(1, 2), keepdims=True))
+
+    x0 /= norm_x
+    y0 /= norm_y
+
+    h = np.matmul(x0.transpose(0, 2, 1), y0)
+    u, singular_values, vt = np.linalg.svd(h)
+    v = vt.transpose(0, 2, 1)
+    rotation = np.matmul(v, u.transpose(0, 2, 1))
+
+    sign_det_rotation = np.sign(np.expand_dims(np.linalg.det(rotation), axis=1))
+    v[:, :, -1] *= sign_det_rotation
+    singular_values[:, -1] *= sign_det_rotation.flatten()
+    rotation = np.matmul(v, u.transpose(0, 2, 1))
+
+    trace = np.expand_dims(np.sum(singular_values, axis=1, keepdims=True), axis=2)
+    scale = trace * norm_x / norm_y
+    translation = mu_x - scale * np.matmul(mu_y, rotation)
+    predicted_aligned = scale * np.matmul(predicted, rotation) + translation
+    return np.linalg.norm(predicted_aligned - target, axis=len(target.shape) - 1)
+
+
+def _compute_metrics_lite(pred_pos_all, gt_pos_all, root_idx=0, concatenate=True):
+    metrics = {
+        "mpjpe_g": [],
+        "mpjpe_l": [],
+        "mpjpe_pa": [],
+        "accel_dist": [],
+        "vel_dist": [],
+    }
+    for idx in range(len(pred_pos_all)):
+        jpos_pred = pred_pos_all[idx].copy()
+        jpos_gt = gt_pos_all[idx].copy()
+        mpjpe_g = np.linalg.norm(jpos_gt - jpos_pred, axis=2) * 1000
+
+        vel_dist = _compute_error_vel(jpos_pred, jpos_gt) * 1000
+        accel_dist = _compute_error_accel(jpos_pred, jpos_gt) * 1000
+
+        jpos_pred = jpos_pred - jpos_pred[:, [root_idx]]
+        jpos_gt = jpos_gt - jpos_gt[:, [root_idx]]
+
+        metrics["mpjpe_g"].append(mpjpe_g)
+        metrics["mpjpe_l"].append(np.linalg.norm(jpos_pred - jpos_gt, axis=2) * 1000)
+        metrics["mpjpe_pa"].append(_p_mpjpe(jpos_pred, jpos_gt) * 1000)
+        metrics["accel_dist"].append(accel_dist)
+        metrics["vel_dist"].append(vel_dist)
+
+    if concatenate:
+        metrics = {key: np.concatenate(value) for key, value in metrics.items()}
+    return metrics
+
+
 class ImEvalCallback(TrainerCallback):
     """Callback to evaluate motion imtiation during training. Supports multigpu ."""
 
@@ -122,6 +224,26 @@ class ImEvalCallback(TrainerCallback):
         self.max_eval_loops = max_eval_loops
         self.max_steps_per_loop = max_steps_per_loop
 
+    def _debug_event(self, event, **details):
+        debug_dir = self.output_dir or os.getcwd()
+        record = {
+            "time": datetime.now().isoformat(),
+            "event": event,
+            "process_index": getattr(getattr(self, "accelerator", None), "process_index", None),
+            "is_main_process": getattr(getattr(self, "accelerator", None), "is_main_process", None),
+            "global_rank": getattr(getattr(self, "args", None), "global_rank", None),
+            **details,
+        }
+        try:
+            os.makedirs(debug_dir, exist_ok=True)
+            debug_path = os.path.join(debug_dir, "im_eval_debug.jsonl")
+            with open(debug_path, "a", encoding="utf-8") as debug_file:
+                debug_file.write(json.dumps(record, default=str) + "\n")
+                debug_file.flush()
+                os.fsync(debug_file.fileno())
+        except Exception as exc:  # noqa: BLE001
+            print(f"[IM_EVAL_DEBUG_ERROR] {type(exc).__name__}: {exc}", flush=True)
+
     def on_step_end(self, args, state, control, **kwargs):
 
         self.env = kwargs.get("env")
@@ -131,23 +253,39 @@ class ImEvalCallback(TrainerCallback):
         self.args = args
         self.model.eval()
 
-        if (state.global_step + 1) % self.eval_frequency == 0:
-            metrics_eval = self.evaluate_policy()
+        should_eval = (state.global_step + 1) % self.eval_frequency == 0
+        self._debug_event(
+            "on_step_end.enter",
+            global_step=state.global_step,
+            eval_frequency=self.eval_frequency,
+            should_eval=should_eval,
+            eval_only=self.eval_only,
+            output_dir=self.output_dir,
+            max_eval_loops=self.max_eval_loops,
+            max_steps_per_loop=self.max_steps_per_loop,
+            num_envs=getattr(self.env, "num_envs", None),
+        )
+        if should_eval:
+            try:
+                self._debug_event("on_step_end.evaluate_policy.start")
+                metrics_eval = self.evaluate_policy()
+                self._debug_event(
+                    "on_step_end.evaluate_policy.returned",
+                    metric_keys=sorted(metrics_eval.keys()) if isinstance(metrics_eval, dict) else None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._debug_event("on_step_end.evaluate_policy.exception", error_type=type(exc).__name__, error=str(exc))
+                raise
+        else:
+            self._debug_event("on_step_end.skipped_frequency")
 
     def save_metrics_eval(self, metrics_eval):
-        metrics_json = {}
-        for k, v in metrics_eval.items():
-            if k in ["eval/all_metrics_dict", "eval/failed_metrics_dict"]:
-                metrics_json[k] = {}
-                for kk, vv in v.items():
-                    if isinstance(vv, np.ndarray):
-                        metrics_json[k][kk] = vv.tolist()
-                    else:
-                        metrics_json[k][kk] = vv
-            elif isinstance(v, np.ndarray):
-                metrics_json[k] = v.tolist()
-            else:
-                metrics_json[k] = v
+        self._debug_event(
+            "save_metrics_eval.start",
+            output_dir=self.output_dir,
+            metric_keys=sorted(metrics_eval.keys()) if isinstance(metrics_eval, dict) else None,
+        )
+        metrics_json = _json_safe(metrics_eval)
 
         os.makedirs(self.output_dir, exist_ok=True)
         with open(os.path.join(self.output_dir, "metrics_eval.json"), "w") as f:
@@ -155,22 +293,37 @@ class ImEvalCallback(TrainerCallback):
             if self.log_keys is not None:
                 metrics_json["log_keys"] = self.log_keys
             json.dump(metrics_json, f, indent=4)
+        self._debug_event("save_metrics_eval.done", metrics_path=os.path.join(self.output_dir, "metrics_eval.json"))
 
     @torch.no_grad()
     def evaluate_policy(self):
 
+        self._debug_event("evaluate_policy.enter")
         self.accelerator.wait_for_everyone()
+        self._debug_event("evaluate_policy.after_wait")
         with torch.no_grad():
             self._eval_mode()
+            self._debug_event("evaluate_policy.after_eval_mode")
             print(
                 "============================================Evaluating policy============================================"
             )
 
             self._pre_evaluate_policy()
+            self._debug_event(
+                "evaluate_policy.after_pre_evaluate",
+                num_total_env_eval_loops=self.num_total_env_eval_loops,
+                render_only=self.render_only,
+                num_unique_motions=getattr(self.env._motion_lib, "_num_unique_motions", None),
+                num_envs=getattr(self.env, "num_envs", None),
+            )
             actor_state = {"done_indices": [], "stop": False}
             step = 0
             self.eval_policy = self._get_inference_policy()
             obs_dict = self.env.reset_all(global_rank=self.args.global_rank)
+            self._debug_event(
+                "evaluate_policy.after_reset_all",
+                obs_keys=sorted(obs_dict.keys()) if isinstance(obs_dict, dict) else None,
+            )
             self.model.policy.init_rollout()
 
             init_actions = torch.zeros(
@@ -180,11 +333,20 @@ class ImEvalCallback(TrainerCallback):
             actor_state = self._pre_eval_env_step(actor_state)
 
             while not actor_state.get("end_eval", False):
+                if step < 3 or step % 25 == 0:
+                    self._debug_event(
+                        "evaluate_policy.loop_step.start",
+                        step=step,
+                        curr_steps=getattr(self, "curr_steps", None),
+                        env_eval_loop_idx=getattr(self, "env_eval_loop_idx", None),
+                    )
                 self.env.render_results()
                 actor_state["step"] = step
                 actor_state = self._pre_eval_env_step(actor_state)
                 actor_state = self.env_step(actor_state)
                 actor_state = self._post_eval_env_step(actor_state)
+                if actor_state.get("end_eval", False):
+                    self._debug_event("evaluate_policy.loop_step.end_eval", step=step)
                 step += 1
 
                 if step % self.empty_cache_freq == 0:
@@ -192,14 +354,21 @@ class ImEvalCallback(TrainerCallback):
                     torch.cuda.empty_cache()
 
             if self.render_only:
+                self._debug_event("evaluate_policy.render_only_exit")
                 self.env.end_render_results()
                 return {}
 
             metrics_eval = self._post_evaluate_policy(actor_state)
+            self._debug_event(
+                "evaluate_policy.after_post_evaluate",
+                metric_keys=sorted(metrics_eval.keys()) if isinstance(metrics_eval, dict) else None,
+            )
 
             if self.eval_only:
                 if self.output_dir is not None:
                     self.save_metrics_eval(metrics_eval)
+                else:
+                    self._debug_event("evaluate_policy.no_output_dir")
             else:
                 metrics_eval["eval/all_metrics_dict"] = create_html_table(
                     metrics_eval["eval/all_metrics_dict"]
@@ -214,6 +383,7 @@ class ImEvalCallback(TrainerCallback):
             gc.collect()
             torch.cuda.empty_cache()
         if self.eval_frequency == 1:  # Exit if eval frequency is 1.
+            self._debug_event("evaluate_policy.os_exit", code=0)
             os._exit(0)
         return metrics_eval
 
@@ -297,13 +467,12 @@ class ImEvalCallback(TrainerCallback):
         pred_pos_other_upper_bodies = [p[:, other_upper_bodies_indices, :] for p in self.pred_pos_all]
         gt_pos_other_upper_bodies = [g[:, other_upper_bodies_indices, :] for g in self.gt_pos_all]
 
-        from smpl_sim.smpllib.smpl_eval import compute_metrics_lite
         print("Computing metrics on pred/gt pos...")
-        metrics_all = compute_metrics_lite(self.pred_pos_all, self.gt_pos_all, concatenate=False)
-        metrics_legs = compute_metrics_lite(pred_pos_legs, gt_pos_legs, concatenate=False)
-        metrics_vr_3points = compute_metrics_lite(pred_pos_vr_3points, gt_pos_vr_3points, concatenate=False)
-        metrics_other_upper_bodies = compute_metrics_lite(pred_pos_other_upper_bodies, gt_pos_other_upper_bodies, concatenate=False)
-        metrics_foot = compute_metrics_lite(pred_pos_foot, gt_pos_foot, concatenate=False)
+        metrics_all = _compute_metrics_lite(self.pred_pos_all, self.gt_pos_all, concatenate=False)
+        metrics_legs = _compute_metrics_lite(pred_pos_legs, gt_pos_legs, concatenate=False)
+        metrics_vr_3points = _compute_metrics_lite(pred_pos_vr_3points, gt_pos_vr_3points, concatenate=False)
+        metrics_other_upper_bodies = _compute_metrics_lite(pred_pos_other_upper_bodies, gt_pos_other_upper_bodies, concatenate=False)
+        metrics_foot = _compute_metrics_lite(pred_pos_foot, gt_pos_foot, concatenate=False)
 
         metrics_legs = {f"{k}_legs": v for k, v in metrics_legs.items()}
         metrics_vr_3points = {f"{k}_vr_3points": v for k, v in metrics_vr_3points.items()}
@@ -443,6 +612,16 @@ class ImEvalCallback(TrainerCallback):
             self.render_only = True
         if self.max_eval_loops is not None:
             self.num_total_env_eval_loops = min(self.num_total_env_eval_loops, self.max_eval_loops)
+
+        self._debug_event(
+            "pre_evaluate_policy.loop_count",
+            num_unique_motions=getattr(self.env._motion_lib, "_num_unique_motions", None),
+            num_envs=getattr(self.env, "num_envs", None),
+            world_size=getattr(self.args, "world_size", None),
+            num_total_env_eval_loops=self.num_total_env_eval_loops,
+            max_eval_loops=self.max_eval_loops,
+            max_steps_per_loop=self.max_steps_per_loop,
+        )
 
         self.env_eval_loop_idx = 0
         self.pbar = tqdm(range(self.num_total_env_eval_loops), desc="Total evaluation progress")
@@ -609,6 +788,18 @@ class ImEvalCallback(TrainerCallback):
             self.progress_rate = np.concatenate(self.progress_memory)[
                 : self.env._motion_lib._num_unique_motions
             ].mean()
+            self._debug_event(
+                "post_eval_env_step.loop_complete",
+                curr_steps=self.curr_steps,
+                curr_max=curr_max,
+                terminated_envs=int(self.terminate_state.sum().item()),
+                num_envs=self.env.num_envs,
+                success_rate=float(self.success_rate),
+                progress_rate=float(self.progress_rate),
+                mpjpe_batches=len(self.mpjpe),
+                pred_pos_batches=len(self.pred_pos),
+                gt_pos_batches=len(self.gt_pos),
+            )
 
             # MPJPE
             all_mpjpe = torch.stack(self.mpjpe)
@@ -673,10 +864,19 @@ class ImEvalCallback(TrainerCallback):
             env_motion_ids = self.env.start_idx + self.env.motion_ids
             self.sampled_motion_idx.append(env_motion_ids)
             self.env_eval_loop_idx += 1
+            self._debug_event(
+                "post_eval_env_step.next_loop_or_finish",
+                env_eval_loop_idx=self.env_eval_loop_idx,
+                num_total_env_eval_loops=self.num_total_env_eval_loops,
+                sampled_motion_batches=len(self.sampled_motion_idx),
+                pred_pos_all=len(self.pred_pos_all),
+                gt_pos_all=len(self.gt_pos_all),
+            )
 
             if self.env_eval_loop_idx >= self.num_total_env_eval_loops:
                 if self.render_only:
                     print("Rendering only. Reached the end of the evaluation loop.")
+                    self._debug_event("post_eval_env_step.render_only_finished")
                     self.env.end_render_results()
                     actor_state["end_eval"] = True
                     return actor_state
@@ -694,14 +894,66 @@ class ImEvalCallback(TrainerCallback):
                 )
                 import traceback as _tb
                 try:
-                  return self._compute_and_report_metrics(
-                      actor_state, terminate_hist, progress_hist
-                  )
+                    self._debug_event(
+                        "post_eval_env_step.compute_metrics.start",
+                        terminate_hist_len=len(terminate_hist),
+                        progress_hist_len=len(progress_hist),
+                        pred_pos_all=len(self.pred_pos_all),
+                        gt_pos_all=len(self.gt_pos_all),
+                        sampled_motion_batches=len(self.sampled_motion_idx),
+                        succ_idxes=succ_idxes,
+                    )
+                    actor_state = self._compute_and_report_metrics(
+                        actor_state, terminate_hist, progress_hist
+                    )
+                    self._debug_event(
+                        "post_eval_env_step.compute_metrics.done",
+                        metric_keys=sorted(actor_state.get("metrics_all", {}).keys()),
+                    )
+                    return actor_state
                 except Exception as _e:
-                  print(f"[EVAL ERROR] {type(_e).__name__}: {_e}")
-                  _tb.print_exc()
-                  actor_state["end_eval"] = True
-                  return actor_state
+                    print(f"[EVAL ERROR] {type(_e).__name__}: {_e}")
+                    _tb.print_exc()
+                    self._debug_event(
+                        "post_eval_env_step.compute_metrics.exception",
+                        error_type=type(_e).__name__,
+                        error=str(_e),
+                    )
+                    motion_idxes = torch.cat(self.sampled_motion_idx).cpu().numpy()
+                    motion_keys = np.asarray(self.env._motion_lib._motion_data_keys)[motion_idxes]
+                    sampling_prob = self.env._motion_lib._sampling_prob[motion_idxes].cpu().numpy()
+                    terminated = terminate_hist[: len(motion_idxes)].astype(bool)
+                    progress = progress_hist[: len(motion_idxes)]
+                    success_rate = 1 - terminated.mean()
+                    progress_rate = progress.mean()
+                    actor_state["metrics_all"] = {
+                        "success_rate": success_rate,
+                        "progress_rate": progress_rate,
+                    }
+                    actor_state["metrics_success"] = {
+                        "success_rate": success_rate,
+                        "progress_rate": progress_rate,
+                    }
+                    actor_state["failed_keys"] = motion_keys[terminated]
+                    actor_state["failed_idxes"] = terminated.nonzero()[0]
+                    actor_state["all_metrics_dict"] = {
+                        "terminated": terminated,
+                        "progress": progress,
+                        "motion_keys": motion_keys,
+                        "sampling_prob": sampling_prob,
+                    }
+                    actor_state["failed_metrics_dict"] = {
+                        "motion_keys": motion_keys[terminated],
+                        "sampling_prob": sampling_prob[terminated],
+                    }
+                    self._debug_event(
+                        "post_eval_env_step.compute_metrics.fallback_metrics",
+                        success_rate=float(success_rate),
+                        progress_rate=float(progress_rate),
+                        num_motions=len(motion_idxes),
+                    )
+                    actor_state["end_eval"] = True
+                    return actor_state
 
                 if hasattr(self.env, "motion_command") and self.env.motion_command is not None:
                     body_names = self.env.motion_command.cmd_body_names

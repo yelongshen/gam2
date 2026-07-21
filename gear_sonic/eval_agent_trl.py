@@ -566,6 +566,20 @@ def main(override_config: omegaconf.OmegaConf):
     if isinstance(eval_callbacks, str):
         eval_callbacks = [eval_callbacks]
 
+    logger.info(
+        "Eval execution config: "
+        f"run_eval_loop={config.get('run_eval_loop', True)}, "
+        f"eval_callbacks={eval_callbacks}, "
+        f"eval_output_dir={config.get('eval_output_dir', None)}, "
+        f"num_envs={config.num_envs}, "
+        f"global_rank={accelerator.process_index}, "
+        f"world_size={accelerator.num_processes}"
+    )
+    eval_output_dir = config.get("eval_output_dir", None)
+    if eval_output_dir is not None and accelerator.is_main_process:
+        os.makedirs(eval_output_dir, exist_ok=True)
+        logger.info(f"Ensured eval_output_dir exists: {eval_output_dir}")
+
     callbacks = {}
     for callback_name in eval_callbacks:
         if callback_name == "im_eval":
@@ -576,6 +590,7 @@ def main(override_config: omegaconf.OmegaConf):
                 config.callbacks.im_eval.log_keys = config.get("log_keys", None)
         if callback_name not in config.callbacks:
             raise ValueError(f"Callback {callback_name} not found")
+        logger.info(f"Instantiating eval callback {callback_name}: {config.callbacks[callback_name]}")
         callbacks[callback_name] = utils.instantiate(config.callbacks[callback_name])
 
     for callback_name, callback in callbacks.items():  # noqa: B007
@@ -583,7 +598,13 @@ def main(override_config: omegaconf.OmegaConf):
             callback.model = model
 
     for callback_name, callback in callbacks.items():  # noqa: B007
-        callback.on_step_end(args, state, None, env=env, model=model, accelerator=accelerator)
+        logger.info(f"Running eval callback on_step_end: {callback_name}")
+        try:
+            callback.on_step_end(args, state, None, env=env, model=model, accelerator=accelerator)
+        except Exception:
+            logger.exception(f"Eval callback failed before producing metrics: {callback_name}")
+            raise
+        logger.info(f"Eval callback returned normally: {callback_name}")
 
     if config.get("run_eval_loop", True):
         env.set_is_evaluating(True)
