@@ -1,5 +1,5 @@
 # @package _global_
-# Backward-compatible alias for the no-teleop variant that keeps G1-SMPL latent consistency.
+# SONIC release variant without teleop encoder sampling, while keeping G1-SMPL latent consistency.
 
 defaults:
   - sonic_release
