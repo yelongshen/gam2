@@ -13,3 +13,4 @@ smpl:
     dropout: 0.0
     activation: gelu
     norm_first: true
+    use_flash_attn: false

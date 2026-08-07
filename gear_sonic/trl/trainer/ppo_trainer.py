@@ -2164,7 +2164,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         if "actor_model_state_dict" in checkpoint:
             model.policy.load_state_dict(checkpoint["actor_model_state_dict"])
         elif "policy_state_dict" in checkpoint:
-            model.policy.load_state_dict(checkpoint["policy_state_dict"], strict=False)
+            model.policy.load_state_dict(checkpoint["policy_state_dict"], strict=True)
         if "value_state_dict" in checkpoint and model.value_model is not None:
             model.value_model.load_state_dict(checkpoint["value_state_dict"])
 

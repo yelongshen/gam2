@@ -6,6 +6,7 @@ defaults:
   - override /actor_critic: universal_token/g1_smpl_transformer_encoder_v1
   - _self_
 
+num_envs: 8192
 exp_var: transformer_encoder
 
 manager_env:
